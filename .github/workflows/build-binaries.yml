@@ -2,6 +2,12 @@ name: Build Binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      build_arm64_native:
+        description: "Build native ARM64 onefile binaries on an ARM64 runner"
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
@@ -15,7 +21,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.11"
-  APP_NAME: tg-daemon
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-windows:
@@ -27,18 +33,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Verify entry files
+      - name: Verify inputs
         shell: pwsh
         run: |
           if (!(Test-Path "server_main.py")) { throw "server_main.py not found in repository root" }
@@ -46,7 +52,7 @@ jobs:
           if (!(Test-Path "build/tg-server.spec")) { throw "build/tg-server.spec not found" }
           if (!(Test-Path "build/tg-cli.spec")) { throw "build/tg-cli.spec not found" }
 
-      - name: Build Windows executables
+      - name: Build executables
         shell: pwsh
         run: |
           pyinstaller --noconfirm build/tg-server.spec
@@ -55,7 +61,7 @@ jobs:
           if (!(Test-Path "dist/tg-server.exe")) { throw "dist/tg-server.exe not found after build" }
           if (!(Test-Path "dist/tg-cli.exe")) { throw "dist/tg-cli.exe not found after build" }
 
-      - name: Collect Windows artifacts
+      - name: Collect artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out/windows | Out-Null
@@ -66,7 +72,7 @@ jobs:
 
           Compress-Archive -Path out/windows/* -DestinationPath out/tg-windows-x64.zip -Force
 
-      - name: Upload Windows artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-binaries
@@ -85,24 +91,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Verify entry files
+      - name: Verify inputs
         run: |
           test -f server_main.py || (echo "server_main.py not found in repository root" && exit 1)
           test -f cli_main.py || (echo "cli_main.py not found in repository root" && exit 1)
           test -f build/tg-server.spec || (echo "build/tg-server.spec not found" && exit 1)
           test -f build/tg-cli.spec || (echo "build/tg-cli.spec not found" && exit 1)
 
-      - name: Build Linux executables
+      - name: Build executables
         run: |
           pyinstaller --noconfirm build/tg-server.spec
           pyinstaller --noconfirm build/tg-cli.spec
@@ -110,7 +116,7 @@ jobs:
           test -f dist/tg-server || (echo "dist/tg-server not found after build" && exit 1)
           test -f dist/tg-cli || (echo "dist/tg-cli not found after build" && exit 1)
 
-      - name: Collect Linux artifacts
+      - name: Collect artifacts
         run: |
           mkdir -p out/linux
           cp dist/tg-server out/linux/
@@ -123,7 +129,7 @@ jobs:
 
           tar -C out/linux -czf out/tg-linux-x86_64.tar.gz .
 
-      - name: Upload Linux artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-binaries
@@ -141,12 +147,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install packaging dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Prepare package tree
         run: |
           rm -rf pkg out
           mkdir -p pkg/DEBIAN
           mkdir -p pkg/data/data/com.termux/files/usr/bin
           mkdir -p pkg/data/data/com.termux/files/usr/share/tg-daemon
+          mkdir -p pkg/data/data/com.termux/files/usr/share/tg-daemon/vendor
           mkdir -p out
 
           VERSION="${GITHUB_REF_NAME#v}"
@@ -169,28 +186,124 @@ jobs:
           if [ -f docs.md ]; then cp docs.md pkg/data/data/com.termux/files/usr/share/tg-daemon/; fi
           cp -r app pkg/data/data/com.termux/files/usr/share/tg-daemon/app
 
+          pip install -r requirements.txt -t pkg/data/data/com.termux/files/usr/share/tg-daemon/vendor
+
           cat > pkg/data/data/com.termux/files/usr/bin/tg-server <<'EOF'
           #!/data/data/com.termux/files/usr/bin/sh
           BASE="/data/data/com.termux/files/usr/share/tg-daemon"
+          export PYTHONPATH="$BASE/vendor:$PYTHONPATH"
           exec python "$BASE/server_main.py" "$@"
           EOF
 
           cat > pkg/data/data/com.termux/files/usr/bin/tg-cli <<'EOF'
           #!/data/data/com.termux/files/usr/bin/sh
           BASE="/data/data/com.termux/files/usr/share/tg-daemon"
+          export PYTHONPATH="$BASE/vendor:$PYTHONPATH"
           exec python "$BASE/cli_main.py" "$@"
           EOF
 
           chmod 0755 pkg/data/data/com.termux/files/usr/bin/tg-server
           chmod 0755 pkg/data/data/com.termux/files/usr/bin/tg-cli
 
+      - name: Build deb
+        run: |
           dpkg-deb --build pkg out/tg-daemon-termux-aarch64.deb
 
-      - name: Upload Termux artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: termux-aarch64
           path: out/*
+          if-no-files-found: error
+          compression-level: 0
+
+  build-arm64-native:
+    name: Build native ARM64 onefile binaries
+    if: ${{ vars.ENABLE_ARM64_NATIVE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.build_arm64_native) }}
+    runs-on: [self-hosted, linux, ARM64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install nuitka ordered-set zstandard
+
+      - name: Verify inputs
+        run: |
+          test -f server_main.py || (echo "server_main.py not found in repository root" && exit 1)
+          test -f cli_main.py || (echo "cli_main.py not found in repository root" && exit 1)
+
+      - name: Standalone sanity build
+        run: |
+          rm -rf build-arm64 out
+          mkdir -p out
+
+          python -m nuitka \
+            --assume-yes-for-downloads \
+            --mode=standalone \
+            --include-package=app \
+            --output-dir=build-arm64/standalone-server \
+            --output-filename=tg-server \
+            server_main.py
+
+          python -m nuitka \
+            --assume-yes-for-downloads \
+            --mode=standalone \
+            --include-package=app \
+            --output-dir=build-arm64/standalone-cli \
+            --output-filename=tg-cli \
+            cli_main.py
+
+      - name: Build onefile native binaries
+        run: |
+          python -m nuitka \
+            --assume-yes-for-downloads \
+            --mode=onefile \
+            --include-package=app \
+            --output-dir=build-arm64/onefile-server \
+            --output-filename=tg-server-aarch64 \
+            server_main.py
+
+          python -m nuitka \
+            --assume-yes-for-downloads \
+            --mode=onefile \
+            --include-package=app \
+            --output-dir=build-arm64/onefile-cli \
+            --output-filename=tg-cli-aarch64 \
+            cli_main.py
+
+          test -f build-arm64/onefile-server/tg-server-aarch64 || (echo "tg-server-aarch64 not found" && exit 1)
+          test -f build-arm64/onefile-cli/tg-cli-aarch64 || (echo "tg-cli-aarch64 not found" && exit 1)
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out/arm64-native
+          cp build-arm64/onefile-server/tg-server-aarch64 out/arm64-native/
+          cp build-arm64/onefile-cli/tg-cli-aarch64 out/arm64-native/
+          cp README.md out/arm64-native/
+          if [ -f docs.md ]; then cp docs.md out/arm64-native/; fi
+
+          chmod +x out/arm64-native/tg-server-aarch64
+          chmod +x out/arm64-native/tg-cli-aarch64
+
+          tar -C out/arm64-native -czf out/tg-linux-arm64-native.tar.gz .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-native-binaries
+          path: |
+            out/arm64-native/*
+            out/tg-linux-arm64-native.tar.gz
           if-no-files-found: error
           compression-level: 0
 
@@ -201,24 +314,24 @@ jobs:
       - build-windows
       - build-linux
       - build-termux
+      - build-arm64-native
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download all workflow artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
 
-      - name: Show collected files
+      - name: List collected files
         run: |
           find release-artifacts -type f | sort
 
-      - name: Create or update release
+      - name: Create release if missing
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists."
           else

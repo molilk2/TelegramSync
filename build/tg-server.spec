@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
 
 project_root = Path(SPEC).resolve().parent.parent
 server_script = str(project_root / "server_main.py")
+
+hiddenimports = collect_submodules("telethon")
 
 a = Analysis(
     [server_script],
@@ -13,7 +16,7 @@ a = Analysis(
         (str(project_root / "README.md"), "."),
         (str(project_root / "docs.md"), "."),
     ],
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -33,6 +36,6 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=True,
 )
