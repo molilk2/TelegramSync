@@ -10,8 +10,12 @@ concurrency:
   group: build-binaries-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 env:
   PYTHON_VERSION: "3.11"
+  APP_NAME: tg-daemon
 
 jobs:
   build-windows:
@@ -60,11 +64,15 @@ jobs:
           Copy-Item README.md out/windows/
           if (Test-Path "docs.md") { Copy-Item docs.md out/windows/ }
 
+          Compress-Archive -Path out/windows/* -DestinationPath out/tg-windows-x64.zip -Force
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-binaries
-          path: out/windows/*
+          path: |
+            out/windows/*
+            out/tg-windows-x64.zip
           if-no-files-found: error
           compression-level: 0
 
@@ -113,7 +121,7 @@ jobs:
           chmod +x out/linux/tg-server
           chmod +x out/linux/tg-cli
 
-          tar -C out/linux -czf out/tg-linux-binaries.tar.gz .
+          tar -C out/linux -czf out/tg-linux-x86_64.tar.gz .
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -121,81 +129,62 @@ jobs:
           name: linux-binaries
           path: |
             out/linux/*
-            out/tg-linux-binaries.tar.gz
+            out/tg-linux-x86_64.tar.gz
           if-no-files-found: error
           compression-level: 0
 
   build-termux:
-    name: Build Termux package
+    name: Build Termux aarch64 package
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install builder
+      - name: Prepare package tree
         run: |
-          python -m pip install --upgrade pip
-          pip install termux-create-package
-
-      - name: Prepare Termux package tree
-        run: |
-          rm -rf termux-root out
-          mkdir -p termux-root/data/data/com.termux/files/usr/bin
-          mkdir -p termux-root/data/data/com.termux/files/usr/share/tg-daemon
-
-          cp server_main.py cli_main.py main.py requirements.txt README.md termux-root/data/data/com.termux/files/usr/share/tg-daemon/
-          if [ -f docs.md ]; then cp docs.md termux-root/data/data/com.termux/files/usr/share/tg-daemon/; fi
-          cp -r app termux-root/data/data/com.termux/files/usr/share/tg-daemon/app
-
-          cat > termux-root/data/data/com.termux/files/usr/bin/tg-server <<'EOF'
-          #!/data/data/com.termux/files/usr/bin/sh
-          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
-          exec python "$BASE/server_main.py" "$@"
-          EOF
-
-          cat > termux-root/data/data/com.termux/files/usr/bin/tg-cli <<'EOF'
-          #!/data/data/com.termux/files/usr/bin/sh
-          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
-          exec python "$BASE/cli_main.py" "$@"
-          EOF
-
-          chmod +x termux-root/data/data/com.termux/files/usr/bin/tg-server
-          chmod +x termux-root/data/data/com.termux/files/usr/bin/tg-cli
+          rm -rf pkg out
+          mkdir -p pkg/DEBIAN
+          mkdir -p pkg/data/data/com.termux/files/usr/bin
+          mkdir -p pkg/data/data/com.termux/files/usr/share/tg-daemon
           mkdir -p out
 
-      - name: Build Termux deb
-        run: |
           VERSION="${GITHUB_REF_NAME#v}"
           if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
             VERSION="0.1.0"
           fi
 
-          cat > termux-package.json <<EOF
-          {
-            "name": "tg-daemon",
-            "version": "$VERSION",
-            "arch": "aarch64",
-            "maintainer": "your-name <you@example.com>",
-            "description": "Telegram daemon and cli for Termux",
-            "homepage": "https://github.com/${GITHUB_REPOSITORY}",
-            "depends": ["python"],
-            "files": {
-              "termux-root/data/data/com.termux/files/usr/bin/tg-server": "data/data/com.termux/files/usr/bin/tg-server",
-              "termux-root/data/data/com.termux/files/usr/bin/tg-cli": "data/data/com.termux/files/usr/bin/tg-cli",
-              "termux-root/data/data/com.termux/files/usr/share/tg-daemon": "data/data/com.termux/files/usr/share/tg-daemon"
-            }
-          }
+          cat > pkg/DEBIAN/control <<EOF
+          Package: tg-daemon
+          Version: ${VERSION}
+          Architecture: aarch64
+          Maintainer: your-name <you@example.com>
+          Depends: python
+          Priority: optional
+          Section: utils
+          Description: Telegram daemon and cli for Termux
           EOF
 
-          python -m termux_create_package \
-            --input termux-package.json \
-            --output out/tg-daemon-termux-aarch64.deb
+          cp server_main.py cli_main.py main.py requirements.txt README.md pkg/data/data/com.termux/files/usr/share/tg-daemon/
+          if [ -f docs.md ]; then cp docs.md pkg/data/data/com.termux/files/usr/share/tg-daemon/; fi
+          cp -r app pkg/data/data/com.termux/files/usr/share/tg-daemon/app
+
+          cat > pkg/data/data/com.termux/files/usr/bin/tg-server <<'EOF'
+          #!/data/data/com.termux/files/usr/bin/sh
+          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
+          exec python "$BASE/server_main.py" "$@"
+          EOF
+
+          cat > pkg/data/data/com.termux/files/usr/bin/tg-cli <<'EOF'
+          #!/data/data/com.termux/files/usr/bin/sh
+          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
+          exec python "$BASE/cli_main.py" "$@"
+          EOF
+
+          chmod 0755 pkg/data/data/com.termux/files/usr/bin/tg-server
+          chmod 0755 pkg/data/data/com.termux/files/usr/bin/tg-cli
+
+          dpkg-deb --build pkg out/tg-daemon-termux-aarch64.deb
 
       - name: Upload Termux artifacts
         uses: actions/upload-artifact@v4
@@ -204,3 +193,46 @@ jobs:
           path: out/*
           if-no-files-found: error
           compression-level: 0
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-windows
+      - build-linux
+      - build-termux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Show collected files
+        run: |
+          find release-artifacts -type f | sort
+
+      - name: Create or update release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          find release-artifacts -type f -print0 | while IFS= read -r -d '' file; do
+            echo "Uploading $file"
+            gh release upload "$TAG" "$file" --clobber
+          done
