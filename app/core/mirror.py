@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 
-from telethon import events, utils
+from telethon import utils
 
 from app.core.normalizer import normalize_message
 from app.core.sync import SyncService
@@ -24,7 +23,7 @@ class MirrorService:
             peer_id = utils.get_peer_id(chat)
             chat_id = int(getattr(chat, 'id', 0))
             chat_name = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or getattr(chat, 'username', None) or str(peer_id)
-            self.repo.upsert_follow(chat_id=chat_id, peer_id=peer_id, chat_name=chat_name, entity_ref=str(entity_like), follow_enabled=True, download_media=download_media)
+            self.repo.upsert_follow(chat_id, peer_id=peer_id, chat_name=chat_name, entity_ref=str(entity_like), follow_enabled=True, download_media=download_media)
             return [chat]
 
         chats = []
@@ -49,14 +48,10 @@ class MirrorService:
         except Exception:
             sender = None
         item = normalize_message(chat, msg, sender)
-        self.repo.save_message(item)
-        self.repo.update_chat_state(item['chat_id'], item['message_id'], item.get('date', ''))
         follow = self.repo.get_follow(item['chat_id'])
         dl_enabled = bool(follow['download_media']) if follow else False
-        if dl_enabled and self.downloader and item.get('media_kind'):
-            self.downloader.enqueue_from_item(item, priority=10)
+        self.repo.ingest_message(item, follow_row=follow, enqueue_download=bool(dl_enabled and self.downloader and item.get('media_kind')), download_priority=10, ensure_follow=True)
         self.repo.set_mirror_state('running', '监听中', last_chat_id=item['chat_id'], last_message_id=item['message_id'], started_at=0)
-        self.repo.update_follow_progress(item['chat_id'], last_message_id=item['message_id'], last_event_at=now_ts(), last_error='', chat_name=item['chat_name'])
         return item
 
     async def _gap_check_once(self, chat, *, download_media: bool):
@@ -67,42 +62,25 @@ class MirrorService:
         self.repo.update_follow_progress(chat_id, last_gap_check_at=now_ts(), last_error='')
         return result
 
-    async def run(self, entity_like=None, *, download_media: bool = False, sync_missed_first: bool = False, check_interval: int = 120):
-        targets = await self._load_targets(entity_like, download_media=download_media)
-        started_at = now_ts()
-        self.repo.set_mirror_state('running', 'Mirror 启动', started_at=started_at)
-        if not targets:
-            self.logger.warning('没有可监听的目标。先执行 sync 或 follow add。')
-            self.repo.set_mirror_state('idle', '没有可监听目标')
-            return
+    async def run(self, *, entity_like=None, download_media: bool = False, check_interval: int = 120):
+        chats = await self._load_targets(entity_like, download_media=download_media)
+        if not chats:
+            self.logger.warning('mirror 未找到任何可监听目标')
+            return {'targets': 0, 'check_interval': check_interval}
 
-        chats_by_id = {int(getattr(chat, 'id', 0)): chat for chat in targets}
-        download_map = {row['chat_id']: bool(row['download_media']) for row in self.repo.list_follows(enabled_only=True)}
+        chats_by_id = {int(getattr(chat, 'id', 0)): chat for chat in chats}
+        download_map = {}
+        for row in self.repo.list_follows(enabled_only=True):
+            download_map[int(row['chat_id'])] = bool(row['download_media'])
 
-        if sync_missed_first:
-            for chat in targets:
-                await self._gap_check_once(chat, download_media=download_map.get(int(getattr(chat, 'id', 0)), download_media))
+        for chat_id, chat in list(chats_by_id.items()):
+            try:
+                await self._gap_check_once(chat, download_media=download_map.get(chat_id, download_media))
+            except Exception as exc:
+                self.repo.update_follow_progress(chat_id, last_gap_check_at=now_ts(), last_error=str(exc))
+                self.logger.exception('mirror 启动补漏失败 chat_id=%s', chat_id)
 
-        for chat in targets:
-            @self.client.on(events.NewMessage(chats=chat))
-            async def on_new_message(event, bound_chat=chat):
-                item = await self._ingest_message(event.message, bound_chat)
-                self.logger.info('镜像消息 chat_id=%s message_id=%s text=%s', item.get('chat_id'), item.get('message_id'), (item.get('text') or '').replace('\n', ' ')[:80])
+        self.repo.set_mirror_state('running', 'mirror 目标已准备，实时监听由 daemon 全局 handler 统一处理', started_at=now_ts())
+        self.logger.info('mirror 已准备 %s 个目标，实时监听由 daemon 全局 handler 统一处理', len(chats_by_id))
+        return {'targets': len(chats_by_id), 'check_interval': check_interval}
 
-        async def gap_loop():
-            while True:
-                for chat_id, chat in list(chats_by_id.items()):
-                    try:
-                        await self._gap_check_once(chat, download_media=download_map.get(chat_id, download_media))
-                    except Exception as exc:
-                        self.repo.update_follow_progress(chat_id, last_gap_check_at=now_ts(), last_error=str(exc))
-                        self.logger.exception('周期补漏失败 chat_id=%s', chat_id)
-                await asyncio.sleep(check_interval)
-
-        gap_task = asyncio.create_task(gap_loop())
-        try:
-            await self.client.run_until_disconnected()
-        finally:
-            gap_task.cancel()
-            with contextlib.suppress(Exception):
-                await gap_task

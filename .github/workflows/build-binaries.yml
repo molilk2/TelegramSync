@@ -2,12 +2,6 @@ name: Build Binaries
 
 on:
   workflow_dispatch:
-    inputs:
-      build_arm64_native:
-        description: "Build native ARM64 onefile binaries on an ARM64 runner"
-        required: false
-        default: false
-        type: boolean
   push:
     tags:
       - "v*"
@@ -69,7 +63,6 @@ jobs:
           Copy-Item dist/tg-cli.exe out/windows/
           Copy-Item README.md out/windows/
           if (Test-Path "docs.md") { Copy-Item docs.md out/windows/ }
-
           Compress-Archive -Path out/windows/* -DestinationPath out/tg-windows-x64.zip -Force
 
       - name: Upload artifacts
@@ -123,10 +116,8 @@ jobs:
           cp dist/tg-cli out/linux/
           cp README.md out/linux/
           if [ -f docs.md ]; then cp docs.md out/linux/; fi
-
           chmod +x out/linux/tg-server
           chmod +x out/linux/tg-cli
-
           tar -C out/linux -czf out/tg-linux-x86_64.tar.gz .
 
       - name: Upload artifacts
@@ -139,182 +130,12 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  build-termux:
-    name: Build Termux aarch64 package
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install packaging dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Prepare package tree
-        run: |
-          rm -rf pkg out
-          mkdir -p pkg/DEBIAN
-          mkdir -p pkg/data/data/com.termux/files/usr/bin
-          mkdir -p pkg/data/data/com.termux/files/usr/share/tg-daemon
-          mkdir -p pkg/data/data/com.termux/files/usr/share/tg-daemon/vendor
-          mkdir -p out
-
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
-            VERSION="0.1.0"
-          fi
-
-          cat > pkg/DEBIAN/control <<EOF
-          Package: tg-daemon
-          Version: ${VERSION}
-          Architecture: aarch64
-          Maintainer: your-name <you@example.com>
-          Depends: python
-          Priority: optional
-          Section: utils
-          Description: Telegram daemon and cli for Termux
-          EOF
-
-          cp server_main.py cli_main.py main.py requirements.txt README.md pkg/data/data/com.termux/files/usr/share/tg-daemon/
-          if [ -f docs.md ]; then cp docs.md pkg/data/data/com.termux/files/usr/share/tg-daemon/; fi
-          cp -r app pkg/data/data/com.termux/files/usr/share/tg-daemon/app
-
-          pip install -r requirements.txt -t pkg/data/data/com.termux/files/usr/share/tg-daemon/vendor
-
-          cat > pkg/data/data/com.termux/files/usr/bin/tg-server <<'EOF'
-          #!/data/data/com.termux/files/usr/bin/sh
-          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
-          export PYTHONPATH="$BASE/vendor:$PYTHONPATH"
-          exec python "$BASE/server_main.py" "$@"
-          EOF
-
-          cat > pkg/data/data/com.termux/files/usr/bin/tg-cli <<'EOF'
-          #!/data/data/com.termux/files/usr/bin/sh
-          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
-          export PYTHONPATH="$BASE/vendor:$PYTHONPATH"
-          exec python "$BASE/cli_main.py" "$@"
-          EOF
-
-          chmod 0755 pkg/data/data/com.termux/files/usr/bin/tg-server
-          chmod 0755 pkg/data/data/com.termux/files/usr/bin/tg-cli
-
-      - name: Build deb
-        run: |
-          dpkg-deb --build pkg out/tg-daemon-termux-aarch64.deb
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-aarch64
-          path: out/*
-          if-no-files-found: error
-          compression-level: 0
-
-  build-arm64-native:
-    name: Build native ARM64 onefile binaries
-    if: ${{ vars.ENABLE_ARM64_NATIVE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.build_arm64_native) }}
-    runs-on: [self-hosted, linux, ARM64]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install nuitka ordered-set zstandard
-
-      - name: Verify inputs
-        run: |
-          test -f server_main.py || (echo "server_main.py not found in repository root" && exit 1)
-          test -f cli_main.py || (echo "cli_main.py not found in repository root" && exit 1)
-
-      - name: Standalone sanity build
-        run: |
-          rm -rf build-arm64 out
-          mkdir -p out
-
-          python -m nuitka \
-            --assume-yes-for-downloads \
-            --mode=standalone \
-            --include-package=app \
-            --output-dir=build-arm64/standalone-server \
-            --output-filename=tg-server \
-            server_main.py
-
-          python -m nuitka \
-            --assume-yes-for-downloads \
-            --mode=standalone \
-            --include-package=app \
-            --output-dir=build-arm64/standalone-cli \
-            --output-filename=tg-cli \
-            cli_main.py
-
-      - name: Build onefile native binaries
-        run: |
-          python -m nuitka \
-            --assume-yes-for-downloads \
-            --mode=onefile \
-            --include-package=app \
-            --output-dir=build-arm64/onefile-server \
-            --output-filename=tg-server-aarch64 \
-            server_main.py
-
-          python -m nuitka \
-            --assume-yes-for-downloads \
-            --mode=onefile \
-            --include-package=app \
-            --output-dir=build-arm64/onefile-cli \
-            --output-filename=tg-cli-aarch64 \
-            cli_main.py
-
-          test -f build-arm64/onefile-server/tg-server-aarch64 || (echo "tg-server-aarch64 not found" && exit 1)
-          test -f build-arm64/onefile-cli/tg-cli-aarch64 || (echo "tg-cli-aarch64 not found" && exit 1)
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p out/arm64-native
-          cp build-arm64/onefile-server/tg-server-aarch64 out/arm64-native/
-          cp build-arm64/onefile-cli/tg-cli-aarch64 out/arm64-native/
-          cp README.md out/arm64-native/
-          if [ -f docs.md ]; then cp docs.md out/arm64-native/; fi
-
-          chmod +x out/arm64-native/tg-server-aarch64
-          chmod +x out/arm64-native/tg-cli-aarch64
-
-          tar -C out/arm64-native -czf out/tg-linux-arm64-native.tar.gz .
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: arm64-native-binaries
-          path: |
-            out/arm64-native/*
-            out/tg-linux-arm64-native.tar.gz
-          if-no-files-found: error
-          compression-level: 0
-
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - build-windows
       - build-linux
-      - build-termux
-      - build-arm64-native
     runs-on: ubuntu-latest
 
     steps:
@@ -335,9 +156,7 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists."
           else
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --generate-notes
+            gh release create "$TAG" --title "$TAG" --generate-notes
           fi
 
       - name: Upload release assets

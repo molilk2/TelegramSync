@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable
 
 from app.utils import dump_json_compact_compressed, now_ts
 
@@ -12,7 +11,7 @@ class Repo:
         self.conn = db.conn
         self.lock = db.lock
 
-    def save_message(self, data: dict) -> None:
+    def save_message(self, data: dict, *, commit: bool = True) -> None:
         ts = now_ts()
         with self.lock:
             cur = self.conn.cursor()
@@ -45,9 +44,10 @@ class Repo:
                     data.get('file_size'), data.get('grouped_id'), ts, ts,
                 ),
             )
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
 
-    def update_chat_state(self, chat_id: int, message_id: int, date: str) -> None:
+    def update_chat_state(self, chat_id: int, message_id: int, date: str, *, commit: bool = True) -> None:
         ts = now_ts()
         with self.lock:
             cur = self.conn.cursor()
@@ -63,7 +63,8 @@ class Repo:
             ''',
                 (chat_id, message_id, date or '', ts),
             )
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
 
     def get_chat_state(self, chat_id: int):
         with self.lock:
@@ -194,10 +195,10 @@ class Repo:
             )
             self.conn.commit()
 
-    def upsert_follow(self, *, chat_id: int, peer_id: int | None, chat_name: str = '', entity_ref: str = '', username: str = '',
+    def upsert_follow(self, chat_id: int, peer_id: int | None, chat_name: str = '', entity_ref: str = '', username: str = '',
                       follow_enabled: bool = True, download_media: bool = False, last_message_id: int = 0,
                       last_sync_at: int | None = None, last_gap_check_at: int | None = None,
-                      last_event_at: int | None = None, last_error: str | None = None) -> None:
+                      last_event_at: int | None = None, last_error: str | None = None, commit: bool = True) -> None:
         ts = now_ts()
         with self.lock:
             cur = self.conn.cursor()
@@ -224,17 +225,18 @@ class Repo:
                 (chat_id, peer_id, chat_name, entity_ref, username, 1 if follow_enabled else 0, 1 if download_media else 0,
                  last_message_id, last_sync_at or 0, last_gap_check_at or 0, last_event_at or 0, last_error or '', ts, ts),
             )
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
 
     def update_follow_progress(self, chat_id: int, *, last_message_id: int | None = None, last_sync_at: int | None = None,
                                last_gap_check_at: int | None = None, last_event_at: int | None = None,
                                last_error: str | None = None, chat_name: str | None = None, peer_id: int | None = None):
         row = self.get_follow(chat_id)
         if not row:
-            self.upsert_follow(chat_id=chat_id, peer_id=peer_id, chat_name=chat_name or '', follow_enabled=True)
+            self.upsert_follow(chat_id, peer_id=peer_id, chat_name=chat_name or '', follow_enabled=True)
             row = self.get_follow(chat_id)
         self.upsert_follow(
-            chat_id=chat_id,
+            chat_id,
             peer_id=peer_id if peer_id is not None else row['peer_id'],
             chat_name=chat_name if chat_name is not None else row['chat_name'],
             entity_ref=row['entity_ref'],
@@ -281,7 +283,7 @@ class Repo:
             cur.execute('UPDATE follows SET download_media=?, updated_at=? WHERE chat_id=?', (1 if enabled else 0, now_ts(), chat_id))
             self.conn.commit()
 
-    def enqueue_download(self, item: dict, *, priority: int = 100, next_retry_at: int | None = None) -> None:
+    def enqueue_download(self, item: dict, *, priority: int = 100, next_retry_at: int | None = None, commit: bool = True) -> None:
         ts = now_ts()
         with self.lock:
             cur = self.conn.cursor()
@@ -306,7 +308,8 @@ class Repo:
                  item.get('file_name', ''), item.get('file_ext', ''), item.get('mime_type', ''), item.get('file_size'), '',
                  priority, next_retry_at or 0, ts, ts),
             )
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
 
     def reserve_download_job(self):
         ts = now_ts()
@@ -328,9 +331,28 @@ class Repo:
             cur.execute('SELECT * FROM download_jobs WHERE id=?', (row['id'],))
             return cur.fetchone()
 
+    def reclaim_stale_download_jobs(self, stale_after_seconds: int = 600) -> int:
+        ts = now_ts()
+        cutoff = ts - int(stale_after_seconds or 600)
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                '''
+                UPDATE download_jobs
+                SET status='pending',
+                    next_retry_at=?,
+                    last_error=CASE WHEN last_error <> '' THEN last_error || ' | stale lease reclaimed' ELSE 'stale lease reclaimed' END,
+                    updated_at=?
+                WHERE status='downloading' AND updated_at > 0 AND updated_at < ?
+                ''',
+                (ts, ts, cutoff),
+            )
+            changed = cur.rowcount or 0
+            self.conn.commit()
+            return changed
+
     def finish_download_job(self, job_id: int, status: str, *, save_path: str = '', file_size_actual: int | None = None, error: str = '', retry_delay: int = 60):
         ts = now_ts()
-        next_retry_at = 0
         with self.lock:
             cur = self.conn.cursor()
             if status == 'failed':
@@ -371,6 +393,53 @@ class Repo:
             cur = self.conn.cursor()
             cur.execute(q, params)
             return cur.fetchall()
+
+    def ingest_message(self, item: dict, *, follow_row=None, enqueue_download: bool = False, download_priority: int = 10, ensure_follow: bool = False):
+        ts = now_ts()
+        with self.lock:
+            self.save_message(item, commit=False)
+            self.update_chat_state(int(item.get('chat_id') or 0), int(item.get('message_id') or 0), item.get('date', ''), commit=False)
+
+            row = follow_row
+            chat_id = int(item.get('chat_id') or 0)
+            if row is None and (ensure_follow or enqueue_download):
+                cur = self.conn.cursor()
+                cur.execute('SELECT * FROM follows WHERE chat_id=?', (chat_id,))
+                row = cur.fetchone()
+
+            if row is not None:
+                self.upsert_follow(
+                    chat_id,
+                    peer_id=row['peer_id'] if 'peer_id' in row.keys() else None,
+                    chat_name=item.get('chat_name') or row['chat_name'],
+                    entity_ref=row['entity_ref'] if 'entity_ref' in row.keys() else '',
+                    username=row['username'] if 'username' in row.keys() else '',
+                    follow_enabled=bool(row['follow_enabled']) if 'follow_enabled' in row.keys() else True,
+                    download_media=bool(row['download_media']) if 'download_media' in row.keys() else False,
+                    last_message_id=int(item.get('message_id') or 0),
+                    last_sync_at=row['last_sync_at'] if 'last_sync_at' in row.keys() else 0,
+                    last_gap_check_at=row['last_gap_check_at'] if 'last_gap_check_at' in row.keys() else 0,
+                    last_event_at=ts,
+                    last_error='',
+                    commit=False,
+                )
+            elif ensure_follow:
+                self.upsert_follow(
+                    chat_id,
+                    peer_id=None,
+                    chat_name=item.get('chat_name', ''),
+                    follow_enabled=True,
+                    download_media=False,
+                    last_message_id=int(item.get('message_id') or 0),
+                    last_event_at=ts,
+                    last_error='',
+                    commit=False,
+                )
+
+            if enqueue_download and item.get('media_kind'):
+                self.enqueue_download(item, priority=download_priority, commit=False)
+
+            self.conn.commit()
 
     def get_download_job_stats(self):
         with self.lock:
@@ -419,7 +488,6 @@ class Repo:
                     out[key] = os.path.getsize(path)
         return out
 
-
     def save_dialog_cache(self, *, chat_id: int, peer_id: int | None, chat_name: str = '', username: str = '', entity_type: str = '') -> None:
         ts = now_ts()
         with self.lock:
@@ -445,6 +513,21 @@ class Repo:
             cur.execute('SELECT * FROM dialogs_cache ORDER BY updated_at DESC, chat_name ASC LIMIT ?', (limit,))
             return cur.fetchall()
 
+    def replace_dialog_cache(self, rows: list[dict]) -> None:
+        ts = now_ts()
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute('DELETE FROM dialogs_cache')
+            for row in rows:
+                cur.execute(
+                    '''
+                    INSERT INTO dialogs_cache (chat_id, peer_id, chat_name, username, entity_type, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ''',
+                    (row.get('chat_id'), row.get('peer_id'), row.get('chat_name', ''), row.get('username', ''), row.get('entity_type', ''), row.get('updated_at', ts)),
+                )
+            self.conn.commit()
+
     def clear_dialog_cache(self) -> None:
         with self.lock:
             self.conn.execute('DELETE FROM dialogs_cache')
@@ -454,7 +537,7 @@ class Repo:
         with self.lock:
             cur = self.conn.cursor()
             cur.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-            checkpoint = cur.fetchall() if cur.description else []
+            _ = cur.fetchall() if cur.description else []
             cur.execute('VACUUM')
             self.conn.commit()
         return self.db_file_stats()

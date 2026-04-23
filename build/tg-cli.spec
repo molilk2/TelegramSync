@@ -1,21 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-
-from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
-project_root = Path(SPEC).resolve().parent.parent
-cli_script = str(project_root / "cli_main.py")
-
-hiddenimports = collect_submodules("telethon")
+hiddenimports = collect_submodules('telethon') + collect_submodules('platformdirs')
 
 a = Analysis(
-    [cli_script],
-    pathex=[str(project_root)],
+    ['cli_main.py'],
+    pathex=[],
     binaries=[],
-    datas=[
-        (str(project_root / "README.md"), "."),
-        (str(project_root / "docs.md"), "."),
-    ],
+    datas=[('README.md', '.'), ('docs.md', '.')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -23,19 +15,17 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
-
 pyz = PYZ(a.pure)
-
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.datas,
     [],
-    name="tg-cli",
+    name='tg-cli',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,
+    upx=True,
     console=True,
 )

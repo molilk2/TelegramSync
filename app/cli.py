@@ -6,21 +6,11 @@ import json
 import sys
 from typing import Any
 
-from app.config.config import load_config, save_config
+from app.config.config import load_config
 from app.config.paths import CONFIG_FILE, DATA_DIR, SESSION_FILE, DB_FILE, LOG_FILE, DOWNLOAD_DIR
 from app.errors import friendly_error_message, format_command_usage_error
 from app.ipc import send_request
 from app.logging_setup import setup_logging
-from app.server import (
-    ensure_server_login,
-    run_server_process,
-    interactive_server_setup,
-    interactive_server_menu,
-    server_logout,
-    cache_account_dialogs,
-)
-from app.store.db import DB
-from app.store.repo import Repo
 
 logger = setup_logging()
 
@@ -42,10 +32,6 @@ def print_paths() -> None:
     print('DOWNLOAD_DIR:', DOWNLOAD_DIR)
 
 
-def ensure_repo() -> Repo:
-    return Repo(DB(DB_FILE))
-
-
 def get_rpc_host_port(args=None):
     cfg = load_config()
     rpc = cfg.get('rpc', {})
@@ -54,54 +40,27 @@ def get_rpc_host_port(args=None):
     return host, port
 
 
+def get_rpc_token() -> str:
+    cfg = load_config()
+    return str(cfg.get('rpc', {}).get('token') or '').strip()
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = FriendlyArgumentParser(prog='tgcli', description='Telegram daemon + cli 工具')
+    parser = FriendlyArgumentParser(prog='tg-cli', description='Telegram CLI 控制端（仅连接已运行的 server）')
+    parser.add_argument('--host', default='')
+    parser.add_argument('--port', type=int, default=0)
+
     sub = parser.add_subparsers(dest='command', required=False)
+    sub.add_parser('ping', help='测试 server 连通性')
+    sub.add_parser('whoami', help='查看 server 当前登录账号')
 
-    p_init = sub.add_parser('init', help='写入基础配置。现在更推荐用 server setup')
-    p_init.add_argument('--api-id', type=int, default=0)
-    p_init.add_argument('--api-hash', default='')
-    p_init.add_argument('--host', default='')
-    p_init.add_argument('--port', type=int, default=0)
-
-    p_server = sub.add_parser('server', help='server 侧命令；不带子命令时进入菜单')
-    sub_server = p_server.add_subparsers(dest='server_cmd', required=False)
-    p_server_setup = sub_server.add_parser('setup', help='在 server 侧写入 API / RPC 配置，可交互输入')
-    p_server_setup.add_argument('--api-id', type=int, default=0)
-    p_server_setup.add_argument('--api-hash', default='')
-    p_server_setup.add_argument('--host', default='')
-    p_server_setup.add_argument('--port', type=int, default=0)
-
-    p_server_login = sub_server.add_parser('login', help='在 server 侧完成登录并缓存一次会话')
-    p_server_login.add_argument('--api-id', type=int, default=0)
-    p_server_login.add_argument('--api-hash', default='')
-    p_server_login.add_argument('--phone', default='')
-
-    p_server_run = sub_server.add_parser('run', help='启动常驻 server')
-    p_server_run.add_argument('--host', default='')
-    p_server_run.add_argument('--port', type=int, default=0)
-    p_server_run.add_argument('--phone', default='')
-    p_server_run.add_argument('--api-id', type=int, default=0)
-    p_server_run.add_argument('--api-hash', default='')
-    p_server_run.add_argument('--check-interval', type=int, default=120)
-    p_server_run.add_argument('--worker-poll-interval', type=int, default=3)
-    p_server_run.add_argument('--no-sync-missed-first', action='store_true')
-
-    sub_server.add_parser('logout', help='删除本地会话文件并退出登录')
-    sub_server.add_parser('optimize-db', help='执行 WAL checkpoint 与 VACUUM')
-
-    p_cli = sub.add_parser('cli', help='通过本地 TCP 连接到 server；不带子命令时进入菜单')
-    p_cli.add_argument('--host', default='')
-    p_cli.add_argument('--port', type=int, default=0)
-    sub_cli = p_cli.add_subparsers(dest='cli_cmd', required=False)
-    sub_cli.add_parser('ping', help='测试 server 连通性')
-    sub_cli.add_parser('whoami', help='查看 server 当前登录账号')
-    p_dialogs = sub_cli.add_parser('dialogs', help='列出最近会话')
+    p_dialogs = sub.add_parser('dialogs', help='列出 server 最近会话')
     p_dialogs.add_argument('--limit', type=int, default=50)
-    p_dialogs_cached = sub_cli.add_parser('dialogs-cached', help='查看 server 缓存的会话')
+
+    p_dialogs_cached = sub.add_parser('dialogs-cached', help='查看 server 缓存的会话')
     p_dialogs_cached.add_argument('--limit', type=int, default=200)
 
-    p_sync = sub_cli.add_parser('sync', help='由 server 执行历史同步；消息先入库，媒体异步入下载队列')
+    p_sync = sub.add_parser('sync', help='由 server 执行历史同步；消息先入库，媒体异步入下载队列')
     p_sync.add_argument('--chat', required=True)
     p_sync.add_argument('--limit', type=int, default=0)
     p_sync.add_argument('--no-resume', action='store_true')
@@ -109,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument('--newest-first', action='store_true')
     p_sync.add_argument('--download-media', action='store_true')
 
-    p_follow = sub_cli.add_parser('follow', help='管理 follow 主体')
+    p_follow = sub.add_parser('follow', help='管理 follow 主体')
     sub_follow = p_follow.add_subparsers(dest='follow_cmd', required=True)
     p_follow_add = sub_follow.add_parser('add', help='添加 follow')
     p_follow_add.add_argument('--chat', required=True)
@@ -126,15 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_follow_dl.add_argument('--chat-id', type=int, required=True)
     p_follow_dl.add_argument('--enabled', choices=['true', 'false'], required=True)
 
-    p_backfill = sub_cli.add_parser('backfill-media', help='扫描历史消息，把缺失媒体补入下载队列')
+    p_backfill = sub.add_parser('backfill-media', help='扫描历史消息，把缺失媒体补入下载队列')
     p_backfill.add_argument('--chat-id', type=int, default=0)
     p_backfill.add_argument('--limit', type=int, default=1000)
 
-    p_status = sub_cli.add_parser('status', help='查看 server 与数据库状态')
+    p_status = sub.add_parser('status', help='查看 server 与数据库状态')
     p_status.add_argument('--chat-id', type=int, default=0)
-    sub_cli.add_parser('stop', help='让 server 优雅退出')
-    sub_cli.add_parser('menu', help='进入交互式菜单')
-    p_channels = sub_cli.add_parser('channels', help='进入频道 / follow 交互管理')
+
+    sub.add_parser('stop', help='让 server 优雅退出')
+    sub.add_parser('menu', help='进入交互式 CLI 菜单')
+    p_channels = sub.add_parser('channels', help='进入频道 / follow 交互管理')
     p_channels.add_argument('--dialogs-limit', type=int, default=100)
 
     p_logs = sub.add_parser('logs', help='查看日志尾部')
@@ -151,7 +111,7 @@ async def send_cli(payload: dict) -> dict:
 
 async def rpc_call(args, payload: dict[str, Any]) -> dict[str, Any]:
     host, port = get_rpc_host_port(args)
-    req = {'_host': host, '_port': port}
+    req = {'_host': host, '_port': port, 'token': get_rpc_token()}
     req.update(payload)
     resp = await send_cli(req)
     if not resp.get('ok'):
@@ -159,12 +119,21 @@ async def rpc_call(args, payload: dict[str, Any]) -> dict[str, Any]:
     return resp.get('data') or {}
 
 
+def format_dialog_label(item: dict) -> str:
+    return (
+        item.get('chat_name')
+        or item.get('name')
+        or item.get('username')
+        or str(item.get('peer_id') or item.get('chat_id') or '-')
+    )
+
+
 def print_follow_rows(rows: list[dict], *, verbose: bool = False) -> None:
     if not rows:
         print('当前没有 follow 主体。')
         return
     for idx, item in enumerate(rows, 1):
-        name = item.get('chat_name') or item.get('name') or '-'
+        name = format_dialog_label(item)
         print(f'{idx:>3}. {name}')
         print(f'     chat_id : {item.get("chat_id", "-")}')
         print(f'     peer_id : {item.get("peer_id", "-")}')
@@ -198,28 +167,6 @@ def _print_status(data: dict):
         print('server 说明           :', server.get('note', '-'))
 
 
-async def interactive_root_menu() -> int:
-    while True:
-        print('\n=== 主菜单 ===')
-        print('1. Server 菜单')
-        print('2. CLI 菜单')
-        print('3. 查看路径')
-        print('0. 退出')
-        choice = input('请选择: ').strip()
-        if choice == '1':
-            repo = ensure_repo()
-            host, port = get_rpc_host_port(None)
-            return await interactive_server_menu(repo=repo, logger=logger, host=host, port=port, check_interval=120, worker_poll_interval=3)
-        if choice == '2':
-            return await interactive_cli_menu(None)
-        if choice == '3':
-            print_paths()
-            continue
-        if choice == '0':
-            return 0
-        print('无效选择，请重试。')
-
-
 async def interactive_cli_channels(args=None) -> int:
     base_args = args or argparse.Namespace(host='', port=0)
     while True:
@@ -241,10 +188,10 @@ async def interactive_cli_channels(args=None) -> int:
                 data = await rpc_call(base_args, {'cmd': 'dialogs.cached', 'limit': 200})
                 rows = data.get('dialogs') or []
                 if not rows:
-                    print('当前没有缓存会话，请先在 server 菜单刷新会话缓存。')
+                    print('当前没有缓存会话，请先使用 tg-server login 或 tg-server 菜单刷新会话缓存。')
                     continue
                 for i, row in enumerate(rows, 1):
-                    print(f'{i:>3}. {row.get("chat_name") or "-"}  peer_id={row.get("peer_id") or "-"}  type={row.get("entity_type") or "-"}')
+                    print(f'{i:>3}. {format_dialog_label(row)}  peer_id={row.get("peer_id") or "-"}  username={row.get("username") or "-"}  type={row.get("entity_type") or "-"}')
                 pick = input('输入序号（空返回）: ').strip()
                 if not pick:
                     continue
@@ -301,6 +248,7 @@ async def interactive_cli_menu(args=None) -> int:
         print('5. 频道 / Follow 管理')
         print('6. 手动同步某个 chat')
         print('7. 停止 server')
+        print('8. 查看日志路径')
         print('0. 返回')
         choice = input('请选择: ').strip()
         try:
@@ -320,9 +268,9 @@ async def interactive_cli_menu(args=None) -> int:
                 data = await rpc_call(base_args, {'cmd': 'dialogs.cached', 'limit': 200})
                 rows = data.get('dialogs') or []
                 for i, row in enumerate(rows, 1):
-                    print(f'{i:>3}. {row.get("chat_name") or "-"}  peer_id={row.get("peer_id") or "-"}  username={row.get("username") or "-"}  type={row.get("entity_type") or "-"}')
+                    print(f'{i:>3}. {format_dialog_label(row)}  peer_id={row.get("peer_id") or "-"}  username={row.get("username") or "-"}  type={row.get("entity_type") or "-"}')
                 if not rows:
-                    print('当前没有缓存会话，请先进入 server 菜单刷新。')
+                    print('当前没有缓存会话，请先使用 tg-server login 或 tg-server 菜单刷新。')
                 continue
             if choice == '5':
                 await interactive_cli_channels(base_args)
@@ -339,6 +287,9 @@ async def interactive_cli_menu(args=None) -> int:
                 await rpc_call(base_args, {'cmd': 'stop'})
                 print('已发送 stop 命令。')
                 continue
+            if choice == '8':
+                print_paths()
+                continue
             if choice == '0':
                 return 0
         except Exception as exc:
@@ -346,114 +297,31 @@ async def interactive_cli_menu(args=None) -> int:
         print('无效选择，请重试。')
 
 
-async def cmd_init(args) -> int:
-    cfg = load_config()
-    tg = cfg.setdefault('telegram', {})
-    rpc = cfg.setdefault('rpc', {})
-    if args.api_id:
-        tg['api_id'] = int(args.api_id)
-    if args.api_hash:
-        tg['api_hash'] = str(args.api_hash).strip()
-    if args.host:
-        rpc['host'] = args.host
-    if args.port:
-        rpc['port'] = int(args.port)
-    save_config(cfg)
-    print('配置已写入。现在更推荐直接用：')
-    print('  python main.py server setup')
-    print('  python main.py server login')
-    print_paths()
-    return 0
-
-
-async def cmd_server(args) -> int:
-    if not getattr(args, 'server_cmd', None):
-        host, port = get_rpc_host_port(args)
-        repo = ensure_repo()
-        return await interactive_server_menu(repo=repo, logger=logger, host=host, port=port, check_interval=120, worker_poll_interval=3, phone=getattr(args, 'phone', ''), api_id=getattr(args, 'api_id', 0), api_hash=getattr(args, 'api_hash', ''))
-
-    if args.server_cmd == 'setup':
-        cfg = interactive_server_setup(api_id=args.api_id, api_hash=args.api_hash, host=args.host, port=args.port)
-        print('server 配置已更新。')
-        print('telegram.api_id :', cfg.get('telegram', {}).get('api_id') or '')
-        print('telegram.api_hash 已保存:', bool(cfg.get('telegram', {}).get('api_hash')))
-        print('rpc.host        :', cfg.get('rpc', {}).get('host') or '')
-        print('rpc.port        :', cfg.get('rpc', {}).get('port') or '')
-        return 0
-
-    if args.server_cmd == 'login':
-        repo = ensure_repo()
-        _, client, me = await ensure_server_login(phone=args.phone, api_id=args.api_id, api_hash=args.api_hash)
-        try:
-            count = await cache_account_dialogs(client, repo, logger)
-        finally:
-            if client.is_connected():
-                await client.disconnect()
-        print('登录成功:', getattr(me, 'username', None) or getattr(me, 'first_name', None) or getattr(me, 'id', 'unknown'))
-        print('已缓存会话:', count)
-        return 0
-
-    if args.server_cmd == 'logout':
-        print('已退出登录并删除会话文件。' if server_logout() else '当前没有可删除的会话文件。')
-        return 0
-
-    if args.server_cmd == 'optimize-db':
-        stats = ensure_repo().optimize_database()
-        print('数据库优化完成。')
-        print('DB 主文件大小:', stats.get('db_size', 0))
-        print('DB WAL 大小 :', stats.get('wal_size', 0))
-        return 0
-
-    host, port = get_rpc_host_port(args)
-    repo = ensure_repo()
-    run_id = repo.create_run('server', f'{host}:{port}', note='server run 启动')
-    try:
-        await run_server_process(
-            repo=repo,
-            logger=logger,
-            host=host,
-            port=port,
-            check_interval=args.check_interval,
-            worker_poll_interval=args.worker_poll_interval,
-            sync_missed_first=not args.no_sync_missed_first,
-            phone=args.phone,
-            api_id=args.api_id,
-            api_hash=args.api_hash,
-        )
-        repo.finish_run(run_id, 'stopped', 'server 正常退出')
-        return 0
-    except KeyboardInterrupt:
-        repo.finish_run(run_id, 'stopped', '用户手动停止')
-        print('\nserver 已手动停止')
-        return 0
-
-
 async def cmd_cli(args) -> int:
-    if not getattr(args, 'cli_cmd', None) or args.cli_cmd == 'menu':
+    if not getattr(args, 'command', None) or args.command == 'menu':
         return await interactive_cli_menu(args)
-    if args.cli_cmd == 'channels':
+    if args.command == 'channels':
         return await interactive_cli_channels(args)
-
-    if args.cli_cmd == 'ping':
+    if args.command == 'ping':
         data = await rpc_call(args, {'cmd': 'ping'})
         print(data.get('message') or 'pong')
         return 0
-    if args.cli_cmd == 'whoami':
+    if args.command == 'whoami':
         data = await rpc_call(args, {'cmd': 'whoami'})
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
-    if args.cli_cmd == 'dialogs':
+    if args.command == 'dialogs':
         data = await rpc_call(args, {'cmd': 'dialogs', 'limit': args.limit})
         for idx, item in enumerate(data.get('dialogs') or [], 1):
             dtype = 'channel' if item.get('is_channel') else ('group' if item.get('is_group') else ('user' if item.get('is_user') else '-'))
             print(f'{idx:>3}. {item.get("name") or "-"}  peer_id={item.get("peer_id") or "-"}  username={item.get("username") or "-"}  type={dtype}')
         return 0
-    if args.cli_cmd == 'dialogs-cached':
+    if args.command == 'dialogs-cached':
         data = await rpc_call(args, {'cmd': 'dialogs.cached', 'limit': args.limit})
         for idx, item in enumerate(data.get('dialogs') or [], 1):
-            print(f'{idx:>3}. {item.get("chat_name") or "-"}  peer_id={item.get("peer_id") or "-"}  username={item.get("username") or "-"}  type={item.get("entity_type") or "-"}')
+            print(f'{idx:>3}. {format_dialog_label(item)}  peer_id={item.get("peer_id") or "-"}  username={item.get("username") or "-"}  type={item.get("entity_type") or "-"}')
         return 0
-    if args.cli_cmd == 'sync':
+    if args.command == 'sync':
         data = await rpc_call(args, {
             'cmd': 'sync', 'chat': args.chat, 'limit': args.limit, 'no_resume': args.no_resume,
             'after_id': args.after_id, 'newest_first': args.newest_first, 'download_media': args.download_media,
@@ -462,25 +330,11 @@ async def cmd_cli(args) -> int:
         print('chat_id :', data.get('chat_id'))
         print('peer_id :', data.get('peer_id'))
         print('新增条数:', data.get('total', 0))
-        if args.download_media:
-            print('提示：媒体已进入下载队列，将由 server 后台异步下载。')
         return 0
-    if args.cli_cmd == 'backfill-media':
-        data = await rpc_call(args, {'cmd': 'backfill-media', 'chat_id': args.chat_id, 'limit': args.limit})
-        print('已补入下载队列:', data.get('count', 0))
-        return 0
-    if args.cli_cmd == 'status':
-        data = await rpc_call(args, {'cmd': 'status', 'chat_id': args.chat_id})
-        _print_status(data)
-        return 0
-    if args.cli_cmd == 'stop':
-        data = await rpc_call(args, {'cmd': 'stop'})
-        print(data.get('message') or 'server stopping')
-        return 0
-    if args.cli_cmd == 'follow':
+    if args.command == 'follow':
         if args.follow_cmd == 'add':
             data = await rpc_call(args, {'cmd': 'follow.add', 'chat': args.chat, 'download_media': args.download_media})
-            print('已添加 follow:', data.get('chat_name') or data.get('chat_id'))
+            print('已添加:', data.get('chat_name') or data.get('chat_id'))
             return 0
         if args.follow_cmd == 'list':
             data = await rpc_call(args, {'cmd': 'follow.list'})
@@ -488,57 +342,55 @@ async def cmd_cli(args) -> int:
             return 0
         if args.follow_cmd == 'remove':
             await rpc_call(args, {'cmd': 'follow.remove', 'chat_id': args.chat_id})
-            print('已移除 follow:', args.chat_id)
+            print('已移除。')
             return 0
         if args.follow_cmd == 'enable':
             await rpc_call(args, {'cmd': 'follow.enable', 'chat_id': args.chat_id})
-            print('已启用 follow:', args.chat_id)
+            print('已启用。')
             return 0
         if args.follow_cmd == 'disable':
             await rpc_call(args, {'cmd': 'follow.disable', 'chat_id': args.chat_id})
-            print('已禁用 follow:', args.chat_id)
+            print('已禁用。')
             return 0
         if args.follow_cmd == 'download':
-            enabled = args.enabled == 'true'
-            await rpc_call(args, {'cmd': 'follow.download', 'chat_id': args.chat_id, 'enabled': enabled})
-            print('已更新下载开关:', args.chat_id, '=>', '开' if enabled else '关')
+            await rpc_call(args, {'cmd': 'follow.download', 'chat_id': args.chat_id, 'enabled': args.enabled == 'true'})
+            print('已更新下载开关。')
             return 0
-    raise RuntimeError('unknown cli command')
-
-
-async def cmd_logs(args) -> int:
-    if not LOG_FILE.exists():
-        print('日志文件不存在。')
+    if args.command == 'backfill-media':
+        data = await rpc_call(args, {'cmd': 'backfill-media', 'chat_id': args.chat_id, 'limit': args.limit})
+        print('已补入下载队列:', data.get('count', 0))
         return 0
-    lines = LOG_FILE.read_text(encoding='utf-8', errors='ignore').splitlines()
-    tail = max(1, int(args.tail or 100))
-    for line in lines[-tail:]:
-        print(line)
-    return 0
-
-
-async def dispatch_async(args) -> int:
-    if not getattr(args, 'command', None):
-        return await interactive_root_menu()
-    if args.command == 'init':
-        return await cmd_init(args)
-    if args.command == 'server':
-        return await cmd_server(args)
-    if args.command == 'cli':
-        return await cmd_cli(args)
+    if args.command == 'status':
+        data = await rpc_call(args, {'cmd': 'status', 'chat_id': args.chat_id})
+        _print_status(data)
+        return 0
+    if args.command == 'stop':
+        data = await rpc_call(args, {'cmd': 'stop'})
+        print(data.get('message') or 'server stopping')
+        return 0
     if args.command == 'logs':
-        return await cmd_logs(args)
+        if not LOG_FILE.exists():
+            print('日志文件不存在。')
+            return 0
+        lines = LOG_FILE.read_text(encoding='utf-8', errors='ignore').splitlines()
+        tail = max(1, int(args.tail or 100))
+        for line in lines[-tail:]:
+            print(line)
+        return 0
     if args.command == 'paths':
         print_paths()
         return 0
-    raise RuntimeError(f'unknown command: {args.command}')
+    raise RuntimeError('unknown cli command')
 
 
 def run_parsed_args(args) -> int:
     try:
-        return asyncio.run(dispatch_async(args))
+        return asyncio.run(cmd_cli(args))
     except SystemExit:
         raise
+    except KeyboardInterrupt:
+        print('\ncli 已取消')
+        return 0
     except Exception as exc:
         logger.exception('执行失败')
         print('错误:', friendly_error_message(exc, action='执行命令'))
@@ -547,14 +399,9 @@ def run_parsed_args(args) -> int:
 
 def cli_entry(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    if raw_argv and raw_argv[0] != 'cli':
-        raw_argv = ['cli', *raw_argv]
-    args = parser.parse_args(raw_argv)
+    args = parser.parse_args(argv)
     return run_parsed_args(args)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return run_parsed_args(args)
+    return cli_entry(argv)

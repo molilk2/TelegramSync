@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from telethon import TelegramClient
 
+try:
+    from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
+except Exception:  # pragma: no cover
+    ConnectionTcpAbridged = None
+
 from app.config.config import load_config
 from app.config.paths import SESSION_FILE
 
@@ -28,13 +33,23 @@ class SessionManager:
         if not api_id or not api_hash:
             raise RuntimeError('Telegram API ID / API Hash 尚未配置，请先执行 init 命令。')
 
+        kwargs = {
+            'auto_reconnect': bool(tg.get('auto_reconnect', True)),
+            'sequential_updates': bool(tg.get('sequential_updates', True)),
+            'receive_updates': bool(tg.get('receive_updates', True)),
+            'request_retries': int(tg.get('request_retries', 8) or 8),
+            'connection_retries': int(tg.get('connection_retries', 8) or 8),
+            'retry_delay': int(tg.get('retry_delay', 2) or 2),
+            'timeout': int(tg.get('timeout', 20) or 20),
+        }
+        if ConnectionTcpAbridged is not None:
+            kwargs['connection'] = ConnectionTcpAbridged
+
         self.client = TelegramClient(
             str(SESSION_FILE),
             int(api_id),
             str(api_hash),
-            auto_reconnect=bool(tg.get('auto_reconnect', True)),
-            sequential_updates=bool(tg.get('sequential_updates', True)),
-            receive_updates=bool(tg.get('receive_updates', True)),
+            **kwargs,
         )
         return self.client
 

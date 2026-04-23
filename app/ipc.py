@@ -5,6 +5,9 @@ import json
 from typing import Any
 
 
+MAX_RPC_PACKET = 2 * 1024 * 1024
+
+
 def encode_message(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -26,6 +29,8 @@ async def read_message(reader: asyncio.StreamReader) -> dict[str, Any] | None:
     size = int.from_bytes(header, byteorder="big", signed=False)
     if size <= 0:
         return {}
+    if size > MAX_RPC_PACKET:
+        raise ValueError(f'invalid rpc packet size: {size}')
     payload = await reader.readexactly(size)
     return json.loads(payload.decode("utf-8"))
 
