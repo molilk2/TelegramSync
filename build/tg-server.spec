@@ -1,29 +1,35 @@
-
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = collect_submodules('telethon') + collect_submodules('platformdirs')
+from pathlib import Path
+
+project_root = Path(SPEC).resolve().parent.parent
+server_script = str(project_root / "server_main.py")
 
 a = Analysis(
-    ['server_main.py'],
-    pathex=[],
+    [server_script],
+    pathex=[str(project_root)],
     binaries=[],
-    datas=[('README.md', '.'), ('docs.md', '.'), ('app', 'app')],
-    hiddenimports=hiddenimports,
+    datas=[
+        (str(project_root / "README.md"), "."),
+        (str(project_root / "docs.md"), "."),
+    ],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
 )
+
 pyz = PYZ(a.pure)
+
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.datas,
     [],
-    name='tg-server',
+    name="tg-server",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

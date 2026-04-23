@@ -1,88 +1,206 @@
-
-name: Build binaries
+name: Build Binaries
 
 on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*'
+      - "v*"
+
+concurrency:
+  group: build-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
 
 jobs:
-  build-linux:
-    name: Linux executable
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
-      - name: Build tg-server and tg-cli
-        run: |
-          pyinstaller --noconfirm build/tg-server.spec
-          pyinstaller --noconfirm build/tg-cli.spec
-          mkdir -p out/linux
-          cp dist/tg-server out/linux/
-          cp dist/tg-cli out/linux/
-          cp README.md docs.md out/linux/
-          tar -C out -czf tg-linux-x64.tar.gz linux
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-x64
-          path: tg-linux-x64.tar.gz
-
   build-windows:
-    name: Windows executable
+    name: Build Windows binaries
     runs-on: windows-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install dependencies
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
-      - name: Build tg-server.exe and tg-cli.exe
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify entry files
+        shell: pwsh
+        run: |
+          if (!(Test-Path "server_main.py")) { throw "server_main.py not found in repository root" }
+          if (!(Test-Path "cli_main.py")) { throw "cli_main.py not found in repository root" }
+          if (!(Test-Path "build/tg-server.spec")) { throw "build/tg-server.spec not found" }
+          if (!(Test-Path "build/tg-cli.spec")) { throw "build/tg-cli.spec not found" }
+
+      - name: Build Windows executables
         shell: pwsh
         run: |
           pyinstaller --noconfirm build/tg-server.spec
           pyinstaller --noconfirm build/tg-cli.spec
+
+          if (!(Test-Path "dist/tg-server.exe")) { throw "dist/tg-server.exe not found after build" }
+          if (!(Test-Path "dist/tg-cli.exe")) { throw "dist/tg-cli.exe not found after build" }
+
+      - name: Collect Windows artifacts
+        shell: pwsh
+        run: |
           New-Item -ItemType Directory -Force -Path out/windows | Out-Null
           Copy-Item dist/tg-server.exe out/windows/
           Copy-Item dist/tg-cli.exe out/windows/
-          Copy-Item README.md, docs.md out/windows/
-          Compress-Archive -Path out/windows/* -DestinationPath tg-windows-x64.zip -Force
-      - uses: actions/upload-artifact@v4
+          Copy-Item README.md out/windows/
+          if (Test-Path "docs.md") { Copy-Item docs.md out/windows/ }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: windows-x64
-          path: tg-windows-x64.zip
+          name: windows-binaries
+          path: out/windows/*
+          if-no-files-found: error
+          compression-level: 0
+
+  build-linux:
+    name: Build Linux binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify entry files
+        run: |
+          test -f server_main.py || (echo "server_main.py not found in repository root" && exit 1)
+          test -f cli_main.py || (echo "cli_main.py not found in repository root" && exit 1)
+          test -f build/tg-server.spec || (echo "build/tg-server.spec not found" && exit 1)
+          test -f build/tg-cli.spec || (echo "build/tg-cli.spec not found" && exit 1)
+
+      - name: Build Linux executables
+        run: |
+          pyinstaller --noconfirm build/tg-server.spec
+          pyinstaller --noconfirm build/tg-cli.spec
+
+          test -f dist/tg-server || (echo "dist/tg-server not found after build" && exit 1)
+          test -f dist/tg-cli || (echo "dist/tg-cli not found after build" && exit 1)
+
+      - name: Collect Linux artifacts
+        run: |
+          mkdir -p out/linux
+          cp dist/tg-server out/linux/
+          cp dist/tg-cli out/linux/
+          cp README.md out/linux/
+          if [ -f docs.md ]; then cp docs.md out/linux/; fi
+
+          chmod +x out/linux/tg-server
+          chmod +x out/linux/tg-cli
+
+          tar -C out/linux -czf out/tg-linux-binaries.tar.gz .
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            out/linux/*
+            out/tg-linux-binaries.tar.gz
+          if-no-files-found: error
+          compression-level: 0
 
   build-termux:
-    name: Termux aarch64 runtime bundle
+    name: Build Termux package
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Prepare Termux bundle
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env:PYTHON_VERSION }}
+
+      - name: Install builder
         run: |
-          mkdir -p out/termux
-          cp -r app out/termux/app
-          cp main.py cli_main.py server_main.py requirements.txt README.md docs.md out/termux/
-          cat > out/termux/tg-server <<'EOF'
+          python -m pip install --upgrade pip
+          pip install termux-create-package
+
+      - name: Prepare Termux package tree
+        run: |
+          rm -rf termux-root out
+          mkdir -p termux-root/data/data/com.termux/files/usr/bin
+          mkdir -p termux-root/data/data/com.termux/files/usr/share/tg-daemon
+
+          cp server_main.py cli_main.py main.py requirements.txt README.md termux-root/data/data/com.termux/files/usr/share/tg-daemon/
+          if [ -f docs.md ]; then cp docs.md termux-root/data/data/com.termux/files/usr/share/tg-daemon/; fi
+          cp -r app termux-root/data/data/com.termux/files/usr/share/tg-daemon/app
+
+          cat > termux-root/data/data/com.termux/files/usr/bin/tg-server <<'EOF'
           #!/data/data/com.termux/files/usr/bin/sh
-          exec python server_main.py "$@"
+          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
+          exec python "$BASE/server_main.py" "$@"
           EOF
-          cat > out/termux/tg-cli <<'EOF'
+
+          cat > termux-root/data/data/com.termux/files/usr/bin/tg-cli <<'EOF'
           #!/data/data/com.termux/files/usr/bin/sh
-          exec python cli_main.py "$@"
+          BASE="/data/data/com.termux/files/usr/share/tg-daemon"
+          exec python "$BASE/cli_main.py" "$@"
           EOF
-          chmod +x out/termux/tg-server out/termux/tg-cli
-          tar -C out -czf tg-termux-aarch64.tar.gz termux
-      - uses: actions/upload-artifact@v4
+
+          chmod +x termux-root/data/data/com.termux/files/usr/bin/tg-server
+          chmod +x termux-root/data/data/com.termux/files/usr/bin/tg-cli
+          mkdir -p out
+
+      - name: Build Termux deb
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION="0.1.0"
+          fi
+
+          cat > termux-package.json <<EOF
+          {
+            "name": "tg-daemon",
+            "version": "$VERSION",
+            "arch": "aarch64",
+            "maintainer": "your-name <you@example.com>",
+            "description": "Telegram daemon and cli for Termux",
+            "homepage": "https://github.com/${GITHUB_REPOSITORY}",
+            "depends": ["python"],
+            "files": {
+              "termux-root/data/data/com.termux/files/usr/bin/tg-server": "data/data/com.termux/files/usr/bin/tg-server",
+              "termux-root/data/data/com.termux/files/usr/bin/tg-cli": "data/data/com.termux/files/usr/bin/tg-cli",
+              "termux-root/data/data/com.termux/files/usr/share/tg-daemon": "data/data/com.termux/files/usr/share/tg-daemon"
+            }
+          }
+          EOF
+
+          python -m termux_create_package \
+            --input termux-package.json \
+            --output out/tg-daemon-termux-aarch64.deb
+
+      - name: Upload Termux artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: termux-aarch64
-          path: tg-termux-aarch64.tar.gz
+          path: out/*
+          if-no-files-found: error
+          compression-level: 0
