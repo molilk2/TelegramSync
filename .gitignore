@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+build-cache/
+dist/
+out/
+
+*.spec.bak
+
+.DS_Store
+Thumbs.db

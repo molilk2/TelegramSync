@@ -1,13 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = collect_submodules('telethon') + collect_submodules('platformdirs')
+ROOT = Path(SPECPATH).resolve().parent.parent
+DOC_FILES = []
+for name in ("README.md", "docs.md"):
+    path = ROOT / name
+    if path.exists():
+        DOC_FILES.append((str(path), "."))
+
+hiddenimports = sorted(set(
+    collect_submodules('telethon')
+    + collect_submodules('platformdirs')
+    + ['sqlite3']
+))
 
 a = Analysis(
-    ['cli_main.py'],
-    pathex=[],
+    [str(ROOT / 'cli_main.py')],
+    pathex=[str(ROOT)],
     binaries=[],
-    datas=[('README.md', '.'), ('docs.md', '.')],
+    datas=DOC_FILES,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

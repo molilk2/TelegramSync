@@ -69,6 +69,14 @@
 
 项目附带 `.github/workflows/build-binaries.yml`，当前用于构建 Linux 和 Windows 分发物。
 
+构建相关文件统一放在 `build/`：
+- `build/tg-server.spec`
+- `build/tg-cli.spec`
+- `build/requirements-build.txt`
+- `build/build-local.sh`
+- `build/build-local.ps1`
+
 补充说明：
 - Linux / Windows：当前仓库已覆盖源码运行与自动构建
 - Termux / Android：当前按**源码运行**为主，暂未纳入 GitHub Actions 自动打包产物
+- 发布包建议只上传归档文件，不再额外上传松散的 dist 目录内容

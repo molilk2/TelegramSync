@@ -125,12 +125,25 @@ PyInstaller 构建说明，用于产出 `tg-server`。
 ### build/tg-cli.spec
 PyInstaller 构建说明，用于产出 `tg-cli`。
 
+### build/README.md
+打包目录说明与本地构建说明。
+
+### build/requirements-build.txt
+构建期额外依赖，当前主要用于固定 PyInstaller。
+
+### build/build-local.sh
+Linux / macOS 本地一键打包脚本。
+
+### build/build-local.ps1
+Windows 本地一键打包脚本。
+
 ### .github/workflows/build-binaries.yml
 GitHub Actions 工作流。
 
 职责：
-- 在 Linux runner 构建 `tg-server` / `tg-cli`
-- 在 Windows runner 构建 `tg-server.exe` / `tg-cli.exe`
+- 用 matrix 统一管理 Linux / Windows 构建
+- 清理 `__pycache__`、`dist/`、`out/`、`build-cache/` 等临时目录
+- 只上传打包后的归档产物到 Actions artifact / GitHub Release
 
 
 ## 平台兼容性说明
