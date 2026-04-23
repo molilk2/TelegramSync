@@ -1,0 +1,2 @@
+telethon>=1.36.0
+platformdirs>=4.2.0
