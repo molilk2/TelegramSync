@@ -1,43 +1,44 @@
 # -*- mode: python ; coding: utf-8 -*-
+
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules
 
-ROOT = Path(SPECPATH).resolve().parent.parent
-DOC_FILES = []
-for name in ("README.md", "docs.md"):
-    path = ROOT / name
-    if path.exists():
-        DOC_FILES.append((str(path), "."))
+ROOT = Path.cwd()
 
-hiddenimports = sorted(set(
-    collect_submodules('telethon')
-    + collect_submodules('platformdirs')
-    + ['sqlite3']
-))
+readme = ROOT / "README.md"
+docs = ROOT / "docs.md"
+
+datas = []
+if readme.exists():
+    datas.append((str(readme), "."))
+if docs.exists():
+    datas.append((str(docs), "."))
 
 a = Analysis(
-    [str(ROOT / 'cli_main.py')],
+    [str(ROOT / "cli_main.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=DOC_FILES,
-    hiddenimports=hiddenimports,
+    datas=datas,
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
+    optimize=0,
 )
+
 pyz = PYZ(a.pure)
+
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.datas,
     [],
-    name='tg-cli',
+    name="tg-cli",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=True,
 )
